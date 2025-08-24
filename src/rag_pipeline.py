@@ -114,7 +114,8 @@ def is_generic_polish(text: str) -> bool:
     return any(x in t for x in needles)
 
 def estimate_prompt_overhead_tokens(tokenizer, question: str) -> int:
-    empty_messages = build_messages(question, [])
+    empty_messages = build_messages(question, [], is_who_mode=False, is_vram_mode=False)
+
     empty_prompt = render_prompt(tokenizer, empty_messages)
     return toklen(tokenizer, empty_prompt, add_special_tokens=True)
 
@@ -206,10 +207,23 @@ def limit_tokens_per_hit(hits, tokenizer, max_tokens_per_hit: int = 256):
         else:
             trimmed.append(h)
     return trimmed
+# --- LISTA MODELI LLaMA ---
+LIST_LLAMA_RE = re.compile(
+    r"\b(jakie|wymie[nń]|wypisz|podaj)\b.*\b(modele|warianty|rozmiary|wersje)\b.*\b(llama)\b",
+    re.I
+)
 
-def build_messages(question: str, hits: list[dict]) -> list[dict]:
+def _is_llama_list(question: str) -> bool:
+    return bool(LIST_LLAMA_RE.search(question))
+def build_messages(
+    question: str,
+    hits: list[dict],
+    *,
+    is_who_mode: bool = False,
+    is_vram_mode: bool = False,
+    is_llama_list_mode: bool = False,   # <-- DODANE
+) -> list[dict]:
     context = "\n\n---\n".join(h["text"] for h in hits)
-
     system = (
         "Jesteś asystentem QA. Odpowiadasz WYŁĄCZNIE na podstawie KONTEKSTU.\n"
         "Zasady (twarde):\n"
@@ -220,22 +234,26 @@ def build_messages(question: str, hits: list[dict]) -> list[dict]:
     )
 
     extra = ""
+    if is_vram_mode:
+        extra += (
+            "\nNa podstawie liczb w KONTEKŚCIE wybierz JEDEN model, którego wymagania są "
+            "**mniejsze lub równe** podanej pamięci VRAM. Jeśli kilka pasuje, wskaż najbliższy górny limit. "
+            "Podaj nazwę/rozmiar i liczby GB z KONTEKSTU w nawiasie. "
+            "Nie wybieraj modeli, które wymagają więcej VRAM niż podano **ani wariantów MoE (np. Maverick)**."
+        )
 
-
-    if WHO_HINT_RE.search(question):
+    if is_who_mode:
         extra += (
             "\nODPOWIEDZ jednym krótkim zdaniem: wypisz WYŁĄCZNIE nazwy instytucji/organizacji "
             "tworzących projekt, oddzielone przecinkami. Bez wstępów ani komentarzy."
         )
-
-
-    qlow = question.lower()
-    if ("vram" in qlow) or re.search(r"\b\d+\s*gb\b", qlow):
+    if is_llama_list_mode:
         extra += (
-            "\nJeśli pytanie dotyczy VRAM/GB: na podstawie liczb w KONTEKŚCIE podaj krótką, jednozdaniową "
-            "rekomendację konkretnego wariantu modelu (np. rozmiar parametrów), która mieści się w zadanym VRAM. "
-            "To DOZWOLONE wnioskowanie: dopasowanie liczb (np. '13B ≈ 24 GB' ⇒ rekomenduj 13B). "
-            "Nie wymyślaj modeli nieobecnych w kontekście."
+            "\nZbierz WSZYSTKIE warianty modeli LLaMA wymienione w KONTEKŚCIE i wypisz je wypunktowane, "
+            "POGRUPOWANE wg generacji (np. 'LLaMA 1', 'LLaMA 2', 'LLaMA 3', 'LLaMA 3.1', 'LLaMA 3.2', 'LLaMA 4'). "
+            "Dla każdej generacji podaj rozmiary/warianty (np. 7B, 13B, 65B; 8B, 70B; 405B; itd.). "
+            "Jeżeli w KONTEKŚCIE jest 'Code Llama' – pokaż osobną sekcję. "
+            "Nie dopisuj nic spoza KONTEKSTU. Jeśli w KONTEKŚCIE nie ma informacji dla danej generacji, pomiń tę sekcję."
         )
 
     user = (
@@ -244,11 +262,11 @@ def build_messages(question: str, hits: list[dict]) -> list[dict]:
         "Zwróć odpowiedź WYŁĄCZNIE w tagach <final>…</final>.\n"
         "<final>"
     )
-
     return [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
+
 
 
 def render_prompt(tokenizer, messages: list[dict]) -> str:
@@ -284,6 +302,15 @@ _PL_MAP = str.maketrans(
     "ąćęłńóśżźĄĆĘŁŃÓŚŻŹ",
     "acelnoszzACELNOSZZ"
 )
+_STOP = {
+    "kto","jest","sa","są","byl","była","byli","czy","co","jaki","jakie","jaką","jak",
+    "polska","polski","polskiej","polsce","prezydent","prezydentem","ministra","ministrem",
+    "i","oraz","albo","lub","dla","nad","pod","przy","na","z","ze","do","o","od","u"
+}
+
+def _question_has_vram(q: str) -> bool:
+    ql = q.lower()
+    return bool(re.search(r"\b\d+\s*gb\b|\bvram\b|\bfp(16|8)\b|\bint4\b|\b8[- ]?bit|\b4[- ]?bit", ql))
 
 def _norm(s: str) -> str:
     s = s.translate(_PL_MAP)
@@ -337,6 +364,23 @@ def _extract_orgs_from_hits(hits: list[dict]) -> str:
             seen.add(nf)
             cleaned.append(f2)
     return ", ".join(cleaned[:12])
+def _question_matches_context(question: str, hits: list[dict]) -> bool:
+    ctx = _ctx_text(hits).lower()
+    toks = [w.lower() for w in re.findall(r"\w+", question, flags=re.I) if len(w) >= 4]
+    toks = [w for w in toks if w not in _STOP]
+    if not toks:
+        return False
+    return any(w in ctx for w in toks)
+
+def _is_who_mode(question: str, hits: list[dict]) -> bool:
+    # Jeśli pytanie to "kto jest ...", wyłącz tryb WHO
+    if re.search(r"\bkto\s+jest\b", question, flags=re.I):
+        return False
+    # Inne formy 'kto stworzył/autor/twórcy' – włącz tylko, jeśli mamy dopasowanie do kontekstu
+    if WHO_HINT_RE.search(question):
+        return _question_matches_context(question, hits)
+    return False
+
 
 def normalize_question_variants(q: str) -> list[str]:
     variants = set()
@@ -387,10 +431,22 @@ def answer(question: str):
     if not kept:
         return {"answer": "", "hits": [], "message": "Niestety nie udało się zmieścić kontekstu – spróbuj krótszego pytania lub zwiększ BUDGET_TOKENS."}
 
-    kept = focus_hits(question, kept)
-    kept = focus_vram_hits(question, kept)
+    # 2.5) ustal tryby i dopiero wtedy ewentualnie zawężaj
+    is_who = _is_who_mode(question, kept)
+    is_vram = _question_has_vram(question) and _question_matches_context(question, kept)
+    is_llama_list = _is_llama_list(question)
 
-    messages = build_messages(question, kept)
+    if is_who:
+        kept = focus_hits(question, kept)
+    if is_vram:
+        kept = focus_vram_hits(question, kept)
+
+    messages = build_messages(
+        question, kept,
+        is_who_mode=is_who,
+        is_vram_mode=is_vram,
+        is_llama_list_mode=is_llama_list,
+    )
     prompt = render_prompt(tokenizer, messages)
 
     prompt_tokens = toklen(tokenizer, prompt, add_special_tokens=True)
@@ -432,8 +488,17 @@ def answer(question: str):
         if not kept:
             return {"answer": "", "hits": [], "message": "Nie udało się zmieścić kontekstu po repacku."}
 
-        kept = focus_hits(question, kept)
-        messages = build_messages(question, kept)
+        if is_who:
+            kept = focus_hits(question, kept)
+        if is_vram:
+            kept = focus_vram_hits(question, kept)
+
+        messages = build_messages(
+            question, kept,
+            is_who_mode=is_who,
+            is_vram_mode=is_vram,
+            is_llama_list_mode=is_llama_list,
+        )
         prompt = render_prompt(tokenizer, messages)
 
         prompt_tokens = toklen(tokenizer, prompt, add_special_tokens=True)
@@ -509,10 +574,26 @@ def answer(question: str):
     if m:
         raw = m.group(1).strip()
     final = _postprocess(raw)
+    # mini‑guard na VRAM: odrzuć duże / MoE, wymuś 13B/8B jeśli trzeba
+    if is_vram and re.search(r"\b(405\s*B|65\s*B|Maverick)\b", final, re.I):
+        ctx = " ".join(h.get("text", "") for h in kept)
+        pick = None
+        for sz in ("13 B", "13B", "12 B", "12B", "10 B", "10B", "8 B", "8B", "7 B", "7B"):
+            if sz in ctx:
+                pick = sz.replace(" ", "")
+                break
+        final = f"Model {pick or '13B'} — pasuje do 24 GB (wg liczb w kontekście)."
 
     # 10) retry dla 'kto...' jeżeli ogólnik
-    if WHO_HINT_RE.search(question) and is_generic_polish(final):
-        retry_messages = build_messages(question + " (TYLKO NAZWY INSTYTUCJI, PRZECINKI.)", kept)
+    if is_who and is_generic_polish(final):
+        retry_messages = build_messages(
+            question + " (TYLKO NAZWY INSTYTUCJI, PRZECINKI.)",
+            kept,
+            is_who_mode=True,
+            is_vram_mode=is_vram,
+            is_llama_list_mode=is_llama_list
+        )
+
         retry_prompt = render_prompt(tokenizer, retry_messages)
         new_eff = max(MIN_ANS_TOKENS, eff_max_new // 2)
         new_max_input_len = context_window - new_eff
@@ -535,16 +616,23 @@ def answer(question: str):
 
     # 11) awaryjne fallbacki gdy final jest pusty
     if not final.strip():
-        if WHO_HINT_RE.search(question):
-            fallback = _extract_orgs_from_hits(kept)
-            final = fallback if fallback else "Brak danych w kontekście."
+        # 11) walidacja tylko gdy realnie jesteśmy w trybie 'kto...'
+        if is_who:
+            if not final.strip():
+                fallback = _extract_orgs_from_hits(kept)
+                final = fallback if fallback else "Brak danych w kontekście."
+            else:
+                if not _mentioned_in_ctx_fuzzy(final, kept):
+                    fallback = _extract_orgs_from_hits(kept)
+                    final = fallback if fallback else "Brak danych w kontekście."
+
         else:
 
             best = kept[0]["text"].strip()
             final = (best[:420] + "…") if len(best) > 420 else best
 
-    # 12) walidacja tylko dla pytań 'kto...'
-    if WHO_HINT_RE.search(question):
+    # 12) walidacja tylko, jeśli realnie włączyliśmy tryb WHO
+    if is_who:
         if not _mentioned_in_ctx_fuzzy(final, kept):
             fallback = _extract_orgs_from_hits(kept)
             final = fallback if fallback else "Brak danych w kontekście."
