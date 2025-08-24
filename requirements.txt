@@ -1,0 +1,21 @@
+# === Core / LLM ===
+numpy>=1.24.0
+torch>=2.1.0
+transformers>=4.40.0
+accelerate>=0.28.0
+safetensors>=0.4.2
+huggingface-hub>=0.23.0
+
+# === Retrieval (embeddings) ===
+sentence-transformers>=3.0.0
+
+# === NLP (dzielenie na zdania) ===
+spacy>=3.7.0
+# Po instalacji paczek jednorazowo:
+#   python -m spacy download pl_core_news_sm
+
+
+# === API/Web ===
+fastapi>=0.112.0
+uvicorn>=0.28.0
+pydantic>=2.7.0

@@ -1,0 +1,18 @@
+{
+  "C:\\Users\\mikol\\PycharmProjects\\chatPA\\docs\\gpt.txt": {
+    "hash": "32931d7d2676688d017b7db4884cc5b9405d0961296eb3fd848376766b5e2f3e",
+    "n_chunks": 36
+  },
+  "C:\\Users\\mikol\\PycharmProjects\\chatPA\\docs\\llama.txt": {
+    "hash": "f812a206e41de96177fd44c871b9583d632d34f459a170e59f37ffcb812c508b",
+    "n_chunks": 39
+  },
+  "C:\\Users\\mikol\\PycharmProjects\\chatPA\\docs\\mistal.txt": {
+    "hash": "3365a4990a0585e187917a7e26b58da4dbda22a8d7d3a5605c6620cf76667cbe",
+    "n_chunks": 57
+  },
+  "C:\\Users\\mikol\\PycharmProjects\\chatPA\\docs\\pllum.txt": {
+    "hash": "e9192c06319b415105c3b09354df7dd16677968444383dacaf010ed30657e198",
+    "n_chunks": 23
+  }
+}

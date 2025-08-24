@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8" />
+  <title>RAG Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --bg:#0b1020; --card:#121a2e; --muted:#9fb0d1; --fg:#e8eefc; --accent:#6ea8fe; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, Segoe UI, Roboto, Helvetica, Arial;
+           background:linear-gradient(180deg, #0b1020 0%, #0b1428 100%); color:var(--fg); }
+    .wrap { max-width: 960px; margin: 40px auto; padding: 0 16px; }
+    .card { background: var(--card); border-radius: 16px; padding: 20px; box-shadow: 0 6px 24px rgba(0,0,0,.25); }
+    h1 { margin:0 0 16px; font-size: 26px; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; }
+    input[type="text"] { flex:1; min-width:260px; padding:12px 14px; border-radius:12px; border:1px solid #223258; background:#0d1430; color:var(--fg); }
+    button { padding:12px 14px; border-radius:12px; border:1px solid #2b3b66; background:#152348; color:var(--fg); cursor:pointer; }
+    button.primary { background: var(--accent); border-color: var(--accent); color:#0b1020; font-weight:600; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    .muted { color: var(--muted); font-size: 14px; }
+    .answer { white-space: pre-wrap; line-height:1.5; }
+    .hits { margin-top: 8px; display: grid; gap: 8px; }
+    .hit { padding:12px; border:1px solid #2b3b66; border-radius:12px; background:#0d1430; }
+    .hit small { color: var(--muted); }
+    .status { margin-top:10px; min-height: 24px; color: var(--muted); }
+    .footer { margin-top: 18px; display:flex; gap:10px; align-items:center; }
+    .pill { font-size:12px; background:#0d1430; border:1px solid #2b3b66; padding:6px 10px; border-radius:999px; }
+    .grid { display:grid; gap:14px; grid-template-columns: 1fr; }
+    @media (min-width: 900px) { .grid { grid-template-columns: 1.4fr .8fr; } }
+    a { color: var(--accent); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>RAG Demo</h1>
+      <p class="muted">Zadaj pytanie do bazy w <code>./docs</code>. Jeżeli zmienisz pliki, kliknij „Przebuduj indeks”.</p>
+
+      <div class="row" style="margin-top:12px;">
+        <input id="q" type="text" placeholder="Napisz pytanie… np. Jakie modele LLaMA są dostępne?" />
+        <button class="primary" id="askBtn">Zapytaj</button>
+        <button id="reindexBtn" title="Zbuduj na nowo chunks + embeddingi">Przebuduj indeks</button>
+      </div>
+
+      <div class="status" id="status"></div>
+
+      <div class="grid" style="margin-top:16px;">
+        <div>
+          <h3>Odpowiedź</h3>
+          <div id="answer" class="answer"></div>
+        </div>
+        <div>
+          <h3>Kontekst (trafienia)</h3>
+          <div id="hits" class="hits"></div>
+        </div>
+      </div>
+
+      <div class="footer">
+        <span class="pill">API: <a href="/docs">/docs</a></span>
+        <span class="pill">Health: <a href="/health">/health</a></span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const qEl = document.getElementById('q');
+    const askBtn = document.getElementById('askBtn');
+    const reindexBtn = document.getElementById('reindexBtn');
+    const statusEl = document.getElementById('status');
+    const answerEl = document.getElementById('answer');
+    const hitsEl = document.getElementById('hits');
+
+    function setBusy(b) {
+      askBtn.disabled = b; reindexBtn.disabled = b;
+      statusEl.textContent = b ? '⏳ Pracuję…' : '';
+    }
+    function showMessage(msg) { statusEl.textContent = msg || ''; }
+
+    function renderHits(hits) {
+      hitsEl.innerHTML = '';
+      if (!hits || !hits.length) return;
+      hits.forEach(h => {
+        const div = document.createElement('div');
+        div.className = 'hit';
+        const src = document.createElement('div');
+        src.innerHTML = `<small>score=${(h.score ?? 0).toFixed(3)} | ${h.source} (chunk ${h.chunk_id})</small>`;
+        const text = document.createElement('div');
+        let t = h.text || '';
+        if (t.length > 600) t = t.slice(0, 600) + '…';
+        text.textContent = t;
+        div.appendChild(src);
+        div.appendChild(text);
+        hitsEl.appendChild(div);
+      });
+    }
+
+    async function callAsk(q) {
+      setBusy(true);
+      answerEl.textContent = '';
+      hitsEl.innerHTML = '';
+      try {
+        const res = await fetch('/api/ask', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ q })
+        });
+        const data = await res.json();
+        if (data.message) {
+          showMessage('⚠️ ' + data.message);
+          return;
+        }
+        answerEl.textContent = data.answer || '(brak odpowiedzi)';
+        renderHits(data.hits || []);
+        showMessage('');
+      } catch (e) {
+        showMessage('❌ Błąd sieci: ' + e);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function callReindex() {
+      setBusy(true);
+      try {
+        const res = await fetch('/api/reindex', { method: 'POST' });
+        const data = await res.json();
+        if (data.message) {
+          showMessage('⚠️ ' + data.message);
+        } else {
+          const s = data.stats || {};
+          showMessage(`✅ Gotowe. vectors=${s.vectors ?? '?'} dim=${s.dim ?? '?'}`);
+        }
+      } catch (e) {
+        showMessage('❌ Błąd sieci: ' + e);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    askBtn.addEventListener('click', () => {
+      const q = (qEl.value || '').trim();
+      if (!q) { qEl.focus(); return; }
+      callAsk(q);
+    });
+    qEl.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') askBtn.click();
+    });
+    reindexBtn.addEventListener('click', callReindex);
+
+    // przykładowe pytanie na start (opcjonalnie)
+    qEl.value = 'Jakie modele LLaMA są dostępne?';
+  </script>
+</body>
+</html>
